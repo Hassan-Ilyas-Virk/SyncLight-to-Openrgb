@@ -18,17 +18,54 @@ if dev:
     except Exception:
         pass
     
-    cfg = dev.get_active_configuration()
-    intf = cfg[(0,0)]
-    ep_out = usb.util.find_descriptor(
-        intf,
-        custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
-    )
+    try:
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0,0)]
+        ep_out = usb.util.find_descriptor(
+            intf,
+            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
+        )
+    except Exception as e:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "SyncLight USB Error", 
+            "Windows blocked access to the SyncLight USB device.\n\n"
+            "This usually happens if you unplugged the light from the USB port, plugged it into a different port, or if Windows automatically overwrote the driver!\n\n"
+            "Solution:\n"
+            "1. Open the Zadig app again.\n"
+            "2. Select the USB2.0-Serial device.\n"
+            "3. Click 'Replace Driver' with WinUSB."
+        )
+        sys.exit(1)
 
 if not ep_out:
     print("WARNING: SyncLight device not found! Bridge will run but no lights will update.")
 else:
     print("SyncLight hardware initialized successfully.")
+    
+# ADDED: Auto-load the last saved color instantly on boot!
+import json
+import os
+
+CONFIG_FILE = "synclight_config.json"
+current_saved_color = None
+last_save_time = 0
+
+if ep_out and os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            data = json.load(f)
+            r, g, b = data.get("r", 255), data.get("g", 255), data.get("b", 255)
+            # Reconstruct payload
+            payload = bytearray([0x52, 0x42, 0x10, 0x01, 0x86, 0x01, r, g, b, 0x50, 0x51, 0x00, 0x00, 0x00, 0xFE, 0x00] + [0x00] * 48)
+            ep_out.write(payload)
+            current_saved_color = (r, g, b)
+            print(f"Applied Startup Color: {r}, {g}, {b}")
+    except Exception as e:
+        print("Failed to load startup color.")
 
 last_send_time = 0
 
@@ -64,6 +101,15 @@ def callback(packet):
         )
         try:
             ep_out.write(payload)
+            
+            # Save the color to config for the next startup (throttled to 2 seconds to save SSD wear)
+            global current_saved_color, last_save_time
+            if current_saved_color != (r, g, b) and now - last_save_time > 2.0:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump({"r": r, "g": g, "b": b}, f)
+                current_saved_color = (r, g, b)
+                last_save_time = now
+                
         except Exception as e:
             pass
 
